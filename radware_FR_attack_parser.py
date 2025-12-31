@@ -1,5 +1,5 @@
 import argparse
-from datetime import timedelta
+from datetime import datetime, timedelta
 import math
 import sys
 from typing import List, Optional
@@ -175,13 +175,21 @@ def pick_latest_csv(input_dir: Path) -> Path:
     return latest
 
 
+def add_timestamp_to_filename(name: str, ts: str) -> str:
+    """Append timestamp before file extension. If no extension, just append _ts."""
+    if '.' in name:
+        base, ext = name.rsplit('.', 1)
+        return f"{base}_{ts}.{ext}"
+    return f"{name}_{ts}"
+
+
 def main():
     ap = argparse.ArgumentParser(description="Summarize Radware attacks grouped by Destination IP and time windows (optional port split).")
-    ap.add_argument("input_csv", nargs='?', default=None, help="Radware CSV filename or path (optional if --input-dir is set; will auto-pick latest .csv)")
-    ap.add_argument("--input-dir", default=r"C:\DATA\Scripts\radware_FR_attack_parser\input", help="Directory containing the input CSV (default: C:/DATA/Inputs). If input_csv is omitted, the latest .csv in this dir is used.")
-    ap.add_argument("--output-dir", default=None, help="Directory to save output reports (CSV/XLSX). If omitted, outputs are saved next to the input file or current directory.")
-    ap.add_argument("--out-csv", default="Attack_Campaigns_By_DstIP_Time.csv", help="Output CSV filename (placed in --output-dir if provided)")
-    ap.add_argument("--out-xlsx", default=None, help="Output Excel filename (placed in --output-dir if provided)")
+    ap.add_argument("input_csv", nargs='?', default=None, help="Radware CSV filename or path (optional; auto-picks latest .csv from --input-dir)")
+    ap.add_argument("--input-dir", default=r"C:\DATA\Scripts\radware_FR_attack_parser\Inputs", help="Directory containing the input CSV (default: C:/DATA/Inputs). If input_csv is omitted, the latest .csv in this dir is used.")
+    ap.add_argument("--output-dir", default=r"C:\DATA\Scripts\radware_FR_attack_parser\Reports", help="Directory to save output reports (CSV/XLSX). If omitted, defaults to C:/DATA/Reports")
+    ap.add_argument("--out-csv", default="Attack_Campaigns_By_DstIP_Time.csv", help="Output CSV filename (placed in output dir)")
+    ap.add_argument("--out-xlsx", default=None, help="Output Excel filename (placed in output dir)")
     ap.add_argument("--gap-min", type=int, default=MERGE_WINDOW_MIN, help="Max gap in minutes to merge events into the same attack window (default: MERGE_WINDOW_MIN)")
     ap.add_argument("--time-format", default="%m.%d.%Y %H:%M:%S", help="Datetime format for Start/End Time (default: %m.%d.%Y %H:%M:%S). Leave empty to infer.")
     ap.add_argument("--split-by-port", action="store_true", help="Add Destination Port to the grouping key (split attacks per dest port).")
@@ -190,14 +198,13 @@ def main():
 
     args = ap.parse_args()
 
-    # Resolve input path (auto-pick latest CSV if input_csv omitted)
+    # Resolve input dir and file (auto-pick latest CSV if input_csv omitted)
     input_dir = Path(args.input_dir)
     input_dir.mkdir(parents=True, exist_ok=True)
 
     if args.input_csv:
         input_path = Path(args.input_csv)
         if not input_path.is_absolute():
-            # If a relative/filename-only arg is provided, read from input_dir
             input_path = input_dir / input_path.name
     else:
         input_path = pick_latest_csv(input_dir)
@@ -243,20 +250,22 @@ def main():
     # Build campaigns
     out = group_campaigns_by_dst(df=df, cols=cols, gap_minutes=int(args.gap_min), split_by_port=bool(args.split_by_port))
 
-    # Resolve and create output directory
-    if args.output_dir:
-        out_dir = Path(args.output_dir)
-    else:
-        out_dir = input_path.parent if str(input_path.parent) != '.' else Path.cwd()
+    # Resolve output dir (default to C:/DATA/Reports) and create it
+    out_dir = Path(args.output_dir) if args.output_dir else Path(r"C:/DATA/Reports")
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Write outputs
-    csv_path = out_dir / args.out_csv
+    # Timestamp for filenames (local time)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    # Write outputs with timestamped filenames
+    csv_name = add_timestamp_to_filename(args.out_csv, ts)
+    csv_path = out_dir / csv_name
     out.to_csv(csv_path, index=False)
     print(f"[OK] Wrote CSV: {csv_path} (rows={len(out)})")
 
     if args.out_xlsx:
-        xlsx_path = out_dir / args.out_xlsx
+        xlsx_name = add_timestamp_to_filename(args.out_xlsx, ts)
+        xlsx_path = out_dir / xlsx_name
         try:
             out.to_excel(xlsx_path, index=False, engine="openpyxl")
         except Exception:
