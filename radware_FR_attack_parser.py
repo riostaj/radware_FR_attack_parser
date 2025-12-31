@@ -134,6 +134,7 @@ def group_campaigns_by_dst(df: pd.DataFrame, cols: dict, gap_minutes: int, split
         protocols = sorted(set(edf.get(cols.get("Protocol", "Protocol"), pd.Series(dtype="object")).dropna().astype(str)))
         cats = sorted(set(edf.get(cols.get("Threat Category", "Threat Category"), pd.Series(dtype="object")).dropna().astype(str)))
         names = sorted(set(edf.get(cols.get("Attack Name", "Attack Name"), pd.Series(dtype="object")).dropna().astype(str)))
+        policies = sorted(set(edf.get(cols.get("Policy Name", "Policy Name"), pd.Series(dtype="object")).dropna().astype(str))) if ("Policy Name" in cols) else []
         ports = [int(p) for p in edf.get("_DestPortNorm", pd.Series(dtype="float")).dropna().unique()] if "_DestPortNorm" in edf.columns else []
         dest_ports_label = ",".join(map(str, sorted(ports))) if ports else "Multiple/Unknown"
         total_pkts = edf.get(cols.get("Total Packets Dropped", "Total Packets Dropped"), pd.Series(dtype="float")).sum(skipna=True)
@@ -152,6 +153,7 @@ def group_campaigns_by_dst(df: pd.DataFrame, cols: dict, gap_minutes: int, split
             "Protocols Seen": ", ".join(protocols) if protocols else "N/A",
             "Threat Categories": ", ".join(cats) if cats else "N/A",
             "Vectors (Attack Names)": "; ".join(names) if names else "N/A",
+            "Policies": "; ".join(policies) if policies else "N/A",
             "Dest Ports": dest_ports_label,
             "Total Packets Dropped": int(total_pkts) if not math.isnan(total_pkts) else np.nan,
             "Total Mbits Dropped": float(total_mbits) if not math.isnan(total_mbits) else np.nan,
