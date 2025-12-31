@@ -178,7 +178,7 @@ def pick_latest_csv(input_dir: Path) -> Path:
 def main():
     ap = argparse.ArgumentParser(description="Summarize Radware attacks grouped by Destination IP and time windows (optional port split).")
     ap.add_argument("input_csv", nargs='?', default=None, help="Radware CSV filename or path (optional if --input-dir is set; will auto-pick latest .csv)")
-    ap.add_argument("--input-dir", default=r"C:/DATA/Inputs", help="Directory containing the input CSV (default: C:/DATA/Inputs). If input_csv is omitted, the latest .csv in this dir is used.")
+    ap.add_argument("--input-dir", default=r"C:\DATA\Scripts\radware_FR_attack_parser\input", help="Directory containing the input CSV (default: C:/DATA/Inputs). If input_csv is omitted, the latest .csv in this dir is used.")
     ap.add_argument("--output-dir", default=None, help="Directory to save output reports (CSV/XLSX). If omitted, outputs are saved next to the input file or current directory.")
     ap.add_argument("--out-csv", default="Attack_Campaigns_By_DstIP_Time.csv", help="Output CSV filename (placed in --output-dir if provided)")
     ap.add_argument("--out-xlsx", default=None, help="Output Excel filename (placed in --output-dir if provided)")
