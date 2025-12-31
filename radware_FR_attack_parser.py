@@ -1,279 +1,196 @@
+#!/usr/bin/env python3
 import argparse
 from datetime import datetime, timedelta
-import math
-import sys
+import math, sys
 from typing import List, Optional
 from pathlib import Path
+import numpy as np, pandas as pd
+MERGE_WINDOW_MIN=5
+RISK_ORDER={"Low":1,"Medium":2,"High":3}; RISK_INV={v:k for k,v in RISK_ORDER.items()}
+COL_ALIASES={"Start Time":["Start Time","Start","Time Start"],"End Time":["End Time","End","Time End"],"Device IP Address":["Device IP Address","Device IP","Device"],"Destination IP Address":["Destination IP Address","Destination IP","Dst IP","DstIP"],"Destination Port":["Destination Port","Dst Port","DstPort","Port"],"Threat Category":["Threat Category","Category"],"Attack Name":["Attack Name","Attack","Vector"],"Action":["Action"],"Protocol":["Protocol","Proto"],"Total Packets Dropped":["Total Packets Dropped","Packets Dropped"],"Total Mbits Dropped":["Total Mbits Dropped","Mbits Dropped"],"Max pps":["Max pps","Peak pps","pps max"],"Max bps":["Max bps","Peak bps","bps max"],"Risk":["Risk"],"Policy Name":["Policy Name","Policy"]}
 
-import numpy as np
-import pandas as pd
-
-# -------- Global merge window (overridden by --gap-min) -------- #
-MERGE_WINDOW_MIN = 5
-
-# -------- Risk helpers -------- #
-RISK_ORDER = {"Low": 1, "Medium": 2, "High": 3}
-RISK_INV = {v: k for k, v in RISK_ORDER.items()}
-
-# Column aliases
-COL_ALIASES = {
-    "Start Time": ["Start Time", "Start", "Time Start"],
-    "End Time": ["End Time", "End", "Time End"],
-    "Device IP Address": ["Device IP Address", "Device IP", "Device"],
-    "Destination IP Address": ["Destination IP Address", "Destination IP", "Dst IP", "DstIP"],
-    "Destination Port": ["Destination Port", "Dst Port", "DstPort", "Port"],
-    "Threat Category": ["Threat Category", "Category"],
-    "Attack Name": ["Attack Name", "Attack", "Vector"],
-    "Action": ["Action"],
-    "Protocol": ["Protocol", "Proto"],
-    "Total Packets Dropped": ["Total Packets Dropped", "Packets Dropped"],
-    "Total Mbits Dropped": ["Total Mbits Dropped", "Mbits Dropped"],
-    "Max pps": ["Max pps", "Peak pps", "pps max"],
-    "Max bps": ["Max bps", "Peak bps", "bps max"],
-    "Risk": ["Risk"],
-    "Policy Name": ["Policy Name", "Policy"],
-}
-
-
-def resolve_columns(df: pd.DataFrame) -> dict:
-    present = {c.lower().strip(): c for c in df.columns}
-    resolved = {}
-    def find_match(candidates: List[str]) -> Optional[str]:
-        for c in candidates:
-            if c in df.columns:
-                return c
-            low = c.lower().strip()
-            if low in present:
-                return present[low]
+def resolve_columns(df):
+    present={c.lower().strip():c for c in df.columns}; resolved={}
+    def find_match(cands):
+        for c in cands:
+            if c in df.columns: return c
+            low=c.lower().strip();
+            if low in present: return present[low]
         return None
-    for canon, candidates in COL_ALIASES.items():
-        match = find_match(candidates)
-        if match:
-            resolved[canon] = match
-    required = ["Destination IP Address", "Start Time", "End Time"]
-    missing = [r for r in required if r not in resolved]
-    if missing:
-        raise ValueError(f"Missing required columns: {missing}. Available: {list(df.columns)}")
+    for canon,cands in COL_ALIASES.items():
+        m=find_match(cands)
+        if m: resolved[canon]=m
+    req=["Destination IP Address","Start Time","End Time"]
+    miss=[r for r in req if r not in resolved]
+    if miss: raise ValueError(f"Missing required columns: {miss}. Available: {list(df.columns)}")
     return resolved
 
+def parse_datetime_col(s,fmt):
+    import pandas as pd
+    if fmt: return pd.to_datetime(s,format=fmt,errors='coerce')
+    return pd.to_datetime(s,errors='coerce',infer_datetime_format=True)
 
-def parse_datetime_col(s: pd.Series, fmt: Optional[str]) -> pd.Series:
-    if fmt:
-        return pd.to_datetime(s, format=fmt, errors="coerce")
-    return pd.to_datetime(s, errors="coerce", infer_datetime_format=True)
+def normalize_port(val):
+    import pandas as pd
+    if pd.isna(val): return None
+    s=str(val).strip().lower()
+    if s in {"multiple","unknown","n/a","na","none","0",""}: return None
+    try: return int(float(s))
+    except: return None
 
+def max_risk_label(series):
+    vals=[RISK_ORDER.get(str(x),0) for x in series.dropna()]
+    m=max(vals,default=0)
+    return RISK_INV.get(m,'N/A')
 
-def normalize_port(val) -> Optional[int]:
-    if pd.isna(val):
-        return None
-    s = str(val).strip().lower()
-    if s in {"multiple", "unknown", "n/a", "na", "none", "0", ""}:
-        return None
-    try:
-        return int(float(s))
-    except Exception:
-        return None
-
-
-def max_risk_label(series: pd.Series) -> str:
-    vals = [RISK_ORDER.get(str(x), 0) for x in series.dropna()]
-    m = max(vals, default=0)
-    return RISK_INV.get(m, "N/A")
-
-
-def group_campaigns_by_dst(df: pd.DataFrame, cols: dict, gap_minutes: int, split_by_port: bool=False) -> pd.DataFrame:
-    w = df.copy()
+def group_campaigns_by_dst(df,cols,gap_minutes,split_by_port=False):
+    import pandas as pd, numpy as np
+    w=df.copy()
     if "Destination Port" in cols:
-        w["_DestPortNorm"] = w[cols["Destination Port"]].apply(normalize_port)
+        w["_DestPortNorm"]=w[cols["Destination Port"]].apply(normalize_port)
     else:
-        w["_DestPortNorm"] = np.nan
-    key_cols = [cols["Destination IP Address"]]
-    if split_by_port:
-        key_cols.append("_DestPortNorm")
-    w = w.sort_values(key_cols + [cols["Start Time"]])
-
-    campaigns = []
-    for key, grp in w.groupby(key_cols, dropna=False):
-        grp = grp.sort_values(cols["Start Time"])
-        current = None
-        for _, r in grp.iterrows():
-            st = r[cols["Start Time"]]
-            et = r[cols["End Time"]]
-            if pd.isna(st) or pd.isna(et):
-                continue
+        w["_DestPortNorm"]=np.nan
+    key_cols=[cols["Destination IP Address"]]
+    if split_by_port: key_cols.append("_DestPortNorm")
+    w=w.sort_values(key_cols+[cols["Start Time"]])
+    campaigns=[]
+    for key,grp in w.groupby(key_cols,dropna=False):
+        grp=grp.sort_values(cols["Start Time"])
+        current=None
+        for _,r in grp.iterrows():
+            st=r[cols["Start Time"]]; et=r[cols["End Time"]]
+            if pd.isna(st) or pd.isna(et): continue
             if current is None:
-                current = {
-                    "Destination IP": r[cols["Destination IP Address"]],
-                    "PortKey": r.get("_DestPortNorm", None) if split_by_port else None,
-                    "Window Start": st,
-                    "Window End": et,
-                    "Events": [r],
-                }
+                current={"Destination IP": r[cols["Destination IP Address"]],"PortKey": r.get("_DestPortNorm",None) if split_by_port else None,"Window Start": st,"Window End": et,"Events":[r]}
                 continue
-            gap = st - current["Window End"]
-            if gap <= timedelta(minutes=gap_minutes):
-                if et > current["Window End"]:
-                    current["Window End"] = et
+            gap=st-current["Window End"]
+            if gap<=timedelta(minutes=gap_minutes):
+                if et>current["Window End"]: current["Window End"]=et
                 current["Events"].append(r)
             else:
                 campaigns.append(current)
-                current = {
-                    "Destination IP": r[cols["Destination IP Address"]],
-                    "PortKey": r.get("_DestPortNorm", None) if split_by_port else None,
-                    "Window Start": st,
-                    "Window End": et,
-                    "Events": [r],
-                }
-        if current is not None:
-            campaigns.append(current)
-
-    rows = []
+                current={"Destination IP": r[cols["Destination IP Address"]],"PortKey": r.get("_DestPortNorm",None) if split_by_port else None,"Window Start": st,"Window End": et,"Events":[r]}
+        if current is not None: campaigns.append(current)
+    rows=[]
     for c in campaigns:
-        edf = pd.DataFrame(c["Events"])
-        devices = sorted(set(edf.get(cols.get("Device IP Address", "Device IP Address"), pd.Series(dtype="object")).dropna().astype(str)))
-        protocols = sorted(set(edf.get(cols.get("Protocol", "Protocol"), pd.Series(dtype="object")).dropna().astype(str)))
-        cats = sorted(set(edf.get(cols.get("Threat Category", "Threat Category"), pd.Series(dtype="object")).dropna().astype(str)))
-        names = sorted(set(edf.get(cols.get("Attack Name", "Attack Name"), pd.Series(dtype="object")).dropna().astype(str)))
-        policies = sorted(set(edf.get(cols.get("Policy Name", "Policy Name"), pd.Series(dtype="object")).dropna().astype(str))) if ("Policy Name" in cols) else []
-        ports = [int(p) for p in edf.get("_DestPortNorm", pd.Series(dtype="float")).dropna().unique()] if "_DestPortNorm" in edf.columns else []
-        dest_ports_label = ",".join(map(str, sorted(ports))) if ports else "Multiple/Unknown"
-        total_pkts = edf.get(cols.get("Total Packets Dropped", "Total Packets Dropped"), pd.Series(dtype="float")).sum(skipna=True)
-        total_mbits = edf.get(cols.get("Total Mbits Dropped", "Total Mbits Dropped"), pd.Series(dtype="float")).sum(skipna=True)
-        peak_pps = edf.get(cols.get("Max pps", "Max pps"), pd.Series(dtype="float")).max(skipna=True)
-        peak_bps = edf.get(cols.get("Max bps", "Max bps"), pd.Series(dtype="float")).max(skipna=True)
-        risk = max_risk_label(edf.get(cols.get("Risk", "Risk"), pd.Series(dtype="object")))
+        edf=pd.DataFrame(c["Events"])
+        devices=sorted(set(edf.get(cols.get("Device IP Address","Device IP Address"),pd.Series(dtype='object')).dropna().astype(str)))
+        protocols=sorted(set(edf.get(cols.get("Protocol","Protocol"),pd.Series(dtype='object')).dropna().astype(str)))
+        cats=sorted(set(edf.get(cols.get("Threat Category","Threat Category"),pd.Series(dtype='object')).dropna().astype(str)))
+        names=sorted(set(edf.get(cols.get("Attack Name","Attack Name"),pd.Series(dtype='object')).dropna().astype(str)))
+        policies=sorted(set(edf.get(cols.get("Policy Name","Policy Name"),pd.Series(dtype='object')).dropna().astype(str))) if ("Policy Name" in cols) else []
+        ports=[int(p) for p in edf.get("_DestPortNorm",pd.Series(dtype='float')).dropna().unique()] if "_DestPortNorm" in edf.columns else []
+        dest_ports_label=",".join(map(str,sorted(ports))) if ports else "Multiple/Unknown"
+        total_pkts=edf.get(cols.get("Total Packets Dropped","Total Packets Dropped"),pd.Series(dtype='float')).sum(skipna=True)
+        total_mbits=edf.get(cols.get("Total Mbits Dropped","Total Mbits Dropped"),pd.Series(dtype='float')).sum(skipna=True)
+        peak_pps=edf.get(cols.get("Max pps","Max pps"),pd.Series(dtype='float')).max(skipna=True)
+        peak_bps=edf.get(cols.get("Max bps","Max bps"),pd.Series(dtype='float')).max(skipna=True)
+        risk=max_risk_label(edf.get(cols.get("Risk","Risk"),pd.Series(dtype='object')))
         rows.append({
-            "Destination IP": c["Destination IP"],
-            **({"Destination Port (key)": int(c["PortKey"]) if (split_by_port and pd.notna(c["PortKey"])) else np.nan} if split_by_port else {}),
             "Attack Window Start": c["Window Start"],
             "Attack Window End": c["Window End"],
-            "Duration (mins)": round((c["Window End"] - c["Window Start"]).total_seconds()/60.0, 2),
+            "Duration (mins)": round((c["Window End"]-c["Window Start"]).total_seconds()/60.0,2),
+            "Destination IP": c["Destination IP"],
             "# Events": int(edf.shape[0]),
-            "Devices Involved": ", ".join(devices) if devices else "N/A",
-            "Protocols Seen": ", ".join(protocols) if protocols else "N/A",
-            "Threat Categories": ", ".join(cats) if cats else "N/A",
-            "Vectors (Attack Names)": "; ".join(names) if names else "N/A",
-            "Policies": "; ".join(policies) if policies else "N/A",
-            "Dest Ports": dest_ports_label,
-            "Total Packets Dropped": int(total_pkts) if not math.isnan(total_pkts) else np.nan,
-            "Total Mbits Dropped": float(total_mbits) if not math.isnan(total_mbits) else np.nan,
             "Peak pps": float(peak_pps) if not math.isnan(peak_pps) else np.nan,
             "Peak bps": float(peak_bps) if not math.isnan(peak_bps) else np.nan,
+            "Threat Categories": ", ".join(cats) if cats else "N/A",
+            "Vectors (Attack Names)": "; ".join(names) if names else "N/A",
+            "Protocols Seen": ", ".join(protocols) if protocols else "N/A",
+            "Dest Ports": dest_ports_label,
+            "Total Packets Dropped": int(total_pkts) if not math.isnan(total_pkts) else np.nan,
+            "Devices Involved": ", ".join(devices) if devices else "N/A",
             "Max Risk": risk,
         })
-    out = pd.DataFrame(rows).sort_values(["Attack Window Start", "Destination IP"]).reset_index(drop=True)
+    out=pd.DataFrame(rows).sort_values(["Attack Window Start","Destination IP"]).reset_index(drop=True)
     return out
 
-
-def pick_latest_csv(input_dir: Path) -> Path:
-    """Return the latest-modified .csv file in input_dir. Raises SystemExit if none found."""
-    input_dir.mkdir(parents=True, exist_ok=True)
-    csvs = list(input_dir.glob('*.csv'))
+def pick_latest_csv(input_dir:Path):
+    input_dir.mkdir(parents=True,exist_ok=True)
+    csvs=list(input_dir.glob('*.csv'))
     if not csvs:
-        print(f"[ERROR] No .csv files found in {input_dir}. Please place your Radware CSV export there or provide input_csv.", file=sys.stderr)
-        sys.exit(4)
-    latest = max(csvs, key=lambda p: p.stat().st_mtime)
-    print(f"[INFO] Auto-selected latest CSV: {latest}")
-    return latest
+        print(f"[ERROR] No .csv files found in {input_dir}",file=sys.stderr); sys.exit(4)
+    latest=max(csvs,key=lambda p:p.stat().st_mtime)
+    print(f"[INFO] Auto-selected latest CSV: {latest}"); return latest
 
-
-def add_timestamp_to_filename(name: str, ts: str) -> str:
-    """Append timestamp before file extension. If no extension, just append _ts."""
+def add_timestamp_to_filename(name:str,ts:str)->str:
     if '.' in name:
-        base, ext = name.rsplit('.', 1)
-        return f"{base}_{ts}.{ext}"
+        base,ext=name.rsplit('.',1); return f"{base}_{ts}.{ext}"
     return f"{name}_{ts}"
 
-
 def main():
-    ap = argparse.ArgumentParser(description="Summarize Radware attacks grouped by Destination IP and time windows (optional port split).")
-    ap.add_argument("input_csv", nargs='?', default=None, help="Radware CSV filename or path (optional; auto-picks latest .csv from --input-dir)")
+    ap=argparse.ArgumentParser(description="Summarize Radware attacks grouped by Destination IP and time windows.")
+    ap.add_argument("input_csv",nargs='?',default=None)
     ap.add_argument("--input-dir", default=r"C:\DATA\Scripts\radware_FR_attack_parser\Inputs", help="Directory containing the input CSV (default: C:/DATA/Inputs). If input_csv is omitted, the latest .csv in this dir is used.")
     ap.add_argument("--output-dir", default=r"C:\DATA\Scripts\radware_FR_attack_parser\Reports", help="Directory to save output reports (CSV/XLSX). If omitted, defaults to C:/DATA/Reports")
-    ap.add_argument("--out-csv", default="Attack_Campaigns_By_DstIP_Time.csv", help="Output CSV filename (placed in output dir)")
-    ap.add_argument("--out-xlsx", default=None, help="Output Excel filename (placed in output dir)")
-    ap.add_argument("--gap-min", type=int, default=MERGE_WINDOW_MIN, help="Max gap in minutes to merge events into the same attack window (default: MERGE_WINDOW_MIN)")
-    ap.add_argument("--time-format", default="%m.%d.%Y %H:%M:%S", help="Datetime format for Start/End Time (default: %m.%d.%Y %H:%M:%S). Leave empty to infer.")
-    ap.add_argument("--split-by-port", action="store_true", help="Add Destination Port to the grouping key (split attacks per dest port).")
-    ap.add_argument("--encoding", default=None, help="Optional file encoding override (e.g., latin1). If not set, tries utf-8 then latin1.")
-    ap.add_argument("--skip-bad-lines", action="store_true", help="Skip malformed CSV lines if any (on_bad_lines='skip').")
-
-    args = ap.parse_args()
-
-    # Resolve input dir and file (auto-pick latest CSV if input_csv omitted)
-    input_dir = Path(args.input_dir)
-    input_dir.mkdir(parents=True, exist_ok=True)
-
+    ap.add_argument("--out-csv",default="Attack_Campaigns_By_DstIP_Time.csv")
+    ap.add_argument("--out-xlsx",default=None)
+    ap.add_argument("--gap-min",type=int,default=MERGE_WINDOW_MIN)
+    ap.add_argument("--time-format",default="%m.%d.%Y %H:%M:%S")
+    ap.add_argument("--split-by-port",action='store_true')
+    ap.add_argument("--encoding",default=None)
+    ap.add_argument("--skip-bad-lines",action='store_true')
+    args=ap.parse_args()
+    input_dir=Path(args.input_dir); input_dir.mkdir(parents=True,exist_ok=True)
     if args.input_csv:
-        input_path = Path(args.input_csv)
-        if not input_path.is_absolute():
-            input_path = input_dir / input_path.name
+        input_path=Path(args.input_csv)
+        if not input_path.is_absolute(): input_path=input_dir/input_path.name
     else:
-        input_path = pick_latest_csv(input_dir)
-
-    # Read input CSV
-    read_kwargs = dict(engine="python")
-    read_kwargs["encoding"] = args.encoding or "utf-8"
-    if args.skip_bad_lines:
-        read_kwargs["on_bad_lines"] = "skip"
+        input_path=pick_latest_csv(input_dir)
+    read_kwargs=dict(engine='python'); read_kwargs['encoding']=args.encoding or 'utf-8'
+    if args.skip_bad_lines: read_kwargs['on_bad_lines']='skip'
+    import pandas as pd
     try:
-        df = pd.read_csv(input_path, **read_kwargs)
+        df=pd.read_csv(input_path,**read_kwargs)
     except UnicodeDecodeError:
-        read_kwargs["encoding"] = "latin1"
-        df = pd.read_csv(input_path, **read_kwargs)
+        read_kwargs['encoding']='latin1'; df=pd.read_csv(input_path,**read_kwargs)
     except Exception as ex:
-        print(f"[ERROR] Failed reading CSV from {input_path}: {ex}", file=sys.stderr)
-        sys.exit(1)
-
-    # Clean columns
-    df.columns = [c.strip() for c in df.columns]
-
-    # Resolve columns
+        print(f"[ERROR] Failed reading CSV from {input_path}: {ex}",file=sys.stderr); sys.exit(1)
+    df.columns=[c.strip() for c in df.columns]
     try:
-        cols = resolve_columns(df)
+        cols=resolve_columns(df)
     except ValueError as ex:
-        print(f"[ERROR] {ex}", file=sys.stderr)
-        sys.exit(2)
-
-    # Parse datetimes
-    dt_fmt = args.time_format if args.time_format else None
+        print(f"[ERROR] {ex}",file=sys.stderr); sys.exit(2)
+    dt_fmt=args.time_format if args.time_format else None
     try:
-        df[cols["Start Time"]] = parse_datetime_col(df[cols["Start Time"]], dt_fmt)
-        df[cols["End Time"]] = parse_datetime_col(df[cols["End Time"]], dt_fmt)
+        df[cols['Start Time']]=parse_datetime_col(df[cols['Start Time']],dt_fmt)
+        df[cols['End Time']]=parse_datetime_col(df[cols['End Time']],dt_fmt)
     except Exception as ex:
-        print(f"[ERROR] Failed parsing datetimes: {ex}", file=sys.stderr)
-        sys.exit(3)
-
-    # Numeric conversions
-    for num_col_key in ["Total Packets Dropped", "Total Mbits Dropped", "Max pps", "Max bps"]:
+        print(f"[ERROR] Failed parsing datetimes: {ex}",file=sys.stderr); sys.exit(3)
+    for num_col_key in ["Total Packets Dropped","Total Mbits Dropped","Max pps","Max bps"]:
         if num_col_key in cols:
-            df[cols[num_col_key]] = pd.to_numeric(df[cols[num_col_key]], errors="coerce")
+            df[cols[num_col_key]]=pd.to_numeric(df[cols[num_col_key]],errors='coerce')
+    out=group_campaigns_by_dst(df,cols,gap_minutes=int(args.gap_min),split_by_port=bool(args.split_by_port))
 
-    # Build campaigns
-    out = group_campaigns_by_dst(df=df, cols=cols, gap_minutes=int(args.gap_min), split_by_port=bool(args.split_by_port))
-
-    # Resolve output dir (default to C:/DATA/Reports) and create it
-    out_dir = Path(args.output_dir) if args.output_dir else Path(r"C:/DATA/Reports")
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    # Timestamp for filenames (local time)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-    # Write outputs with timestamped filenames
-    csv_name = add_timestamp_to_filename(args.out_csv, ts)
-    csv_path = out_dir / csv_name
-    out.to_csv(csv_path, index=False)
-    print(f"[OK] Wrote CSV: {csv_path} (rows={len(out)})")
-
+    # Restrict columns to requested set and order
+    desired_cols = [
+        'Attack Window Start',
+        'Attack Window End',
+        'Duration (mins)',
+        'Destination IP',
+        '# Events',
+        'Peak pps',
+        'Peak bps',
+        'Threat Categories',
+        'Vectors (Attack Names)',
+        'Protocols Seen',
+        'Dest Ports',
+        'Total Packets Dropped',
+        'Devices Involved',
+        'Max Risk'
+    ]
+    # Keep only columns that exist (in case some metrics are missing in input)
+    existing = [c for c in desired_cols if c in out.columns]
+    out = out[existing]
+    out_dir=Path(args.output_dir) if args.output_dir else Path(r"C:/DATA/Reports"); out_dir.mkdir(parents=True,exist_ok=True)
+    ts=datetime.now().strftime("%Y%m%d_%H%M%S")
+    csv_name=add_timestamp_to_filename(args.out_csv,ts); csv_path=out_dir/csv_name
+    out.to_csv(csv_path,index=False); print(f"[OK] Wrote CSV: {csv_path} (rows={len(out)})")
     if args.out_xlsx:
-        xlsx_name = add_timestamp_to_filename(args.out_xlsx, ts)
-        xlsx_path = out_dir / xlsx_name
+        xlsx_name=add_timestamp_to_filename(args.out_xlsx,ts); xlsx_path=out_dir/xlsx_name
         try:
-            out.to_excel(xlsx_path, index=False, engine="openpyxl")
+            out.to_excel(xlsx_path,index=False,engine='openpyxl')
         except Exception:
-            out.to_excel(xlsx_path, index=False)
+            out.to_excel(xlsx_path,index=False)
         print(f"[OK] Wrote Excel: {xlsx_path}")
-
-
-if __name__ == "__main__":
-    main()
+if __name__=='__main__': main()
