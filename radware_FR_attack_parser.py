@@ -8,7 +8,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-
 # -------- Global merge window (overridden by --gap-min) -------- #
 MERGE_WINDOW_MIN = 5
 
@@ -164,10 +163,22 @@ def group_campaigns_by_dst(df: pd.DataFrame, cols: dict, gap_minutes: int, split
     return out
 
 
+def pick_latest_csv(input_dir: Path) -> Path:
+    """Return the latest-modified .csv file in input_dir. Raises SystemExit if none found."""
+    input_dir.mkdir(parents=True, exist_ok=True)
+    csvs = list(input_dir.glob('*.csv'))
+    if not csvs:
+        print(f"[ERROR] No .csv files found in {input_dir}. Please place your Radware CSV export there or provide input_csv.", file=sys.stderr)
+        sys.exit(4)
+    latest = max(csvs, key=lambda p: p.stat().st_mtime)
+    print(f"[INFO] Auto-selected latest CSV: {latest}")
+    return latest
+
+
 def main():
     ap = argparse.ArgumentParser(description="Summarize Radware attacks grouped by Destination IP and time windows (optional port split).")
-    ap.add_argument("input_csv", help="Radware CSV filename or path")
-    ap.add_argument("--input-dir", default=None, help="Directory containing the input CSV (optional). If provided, the script will look for input_csv inside this directory.")
+    ap.add_argument("input_csv", nargs='?', default=None, help="Radware CSV filename or path (optional if --input-dir is set; will auto-pick latest .csv)")
+    ap.add_argument("--input-dir", default=r"C:/DATA/Inputs", help="Directory containing the input CSV (default: C:/DATA/Inputs). If input_csv is omitted, the latest .csv in this dir is used.")
     ap.add_argument("--output-dir", default=None, help="Directory to save output reports (CSV/XLSX). If omitted, outputs are saved next to the input file or current directory.")
     ap.add_argument("--out-csv", default="Attack_Campaigns_By_DstIP_Time.csv", help="Output CSV filename (placed in --output-dir if provided)")
     ap.add_argument("--out-xlsx", default=None, help="Output Excel filename (placed in --output-dir if provided)")
@@ -179,12 +190,17 @@ def main():
 
     args = ap.parse_args()
 
-    # Resolve and create input directory (if provided)
-    input_path = Path(args.input_csv)
-    if args.input_dir:
-        input_dir = Path(args.input_dir)
-        input_dir.mkdir(parents=True, exist_ok=True)
-        input_path = input_dir / input_path.name
+    # Resolve input path (auto-pick latest CSV if input_csv omitted)
+    input_dir = Path(args.input_dir)
+    input_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.input_csv:
+        input_path = Path(args.input_csv)
+        if not input_path.is_absolute():
+            # If a relative/filename-only arg is provided, read from input_dir
+            input_path = input_dir / input_path.name
+    else:
+        input_path = pick_latest_csv(input_dir)
 
     # Read input CSV
     read_kwargs = dict(engine="python")
