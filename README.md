@@ -13,3 +13,13 @@ Destination IP and time windows. Allows changing the merge window via
 Author: Ali Rios Tovar + M365 Copilot
 Date: 2025-12-30
 """
+
+
+# Use default merge window (5 minutes)
+python radware_attack_parser.py "RE_Radware_Attack_Log.csv"
+
+# Override merge window to 10 minutes and export Excel
+python radware_attack_parser.py "RE_Radware_Attack_Log.csv" \
+  --gap-min 10 \
+  --out-xlsx "Attack_Summary.xlsx"
+
